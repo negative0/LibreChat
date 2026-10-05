@@ -54,6 +54,7 @@ export * from './accessPermissions';
 export * from './keys';
 /* api call helpers */
 export * from './headers-helpers';
+export * from './cloudflareChallenge';
 export {
   loginPage,
   registerPage,

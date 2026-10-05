@@ -2482,6 +2482,8 @@ export const turnstileOptionsSchema = z
 export const turnstileSchema = z.object({
   siteKey: z.string(),
   options: turnstileOptionsSchema.optional(),
+  /** Answer Cloudflare managed challenges on API requests with this widget (see `cloudflareChallenge.ts`) */
+  managedChallenge: z.boolean().optional(),
 });
 
 export type TTurnstileConfig = z.infer<typeof turnstileSchema>;
