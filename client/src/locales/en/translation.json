@@ -1368,6 +1368,8 @@
   "com_ui_click_to_view_var": "Click to view {{0}}",
   "com_ui_client_id": "Client ID",
   "com_ui_client_secret": "Client Secret",
+  "com_ui_cloudflare_challenge_description": "Complete the check below to continue. Your request will be sent again once it passes.",
+  "com_ui_cloudflare_challenge_title": "Verify you are human",
   "com_ui_close": "Close",
   "com_ui_close_menu": "Close Menu",
   "com_ui_close_settings": "Close Settings",

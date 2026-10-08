@@ -1,6 +1,6 @@
-import logger from '~/config/winston';
 import { removeNullishValues } from 'librechat-data-provider';
 import type { TCustomConfig, TConfigDefaults } from 'librechat-data-provider';
+import logger from '~/config/winston';
 
 /**
  * Loads and maps the Cloudflare Turnstile configuration.
@@ -12,6 +12,7 @@ import type { TCustomConfig, TConfigDefaults } from 'librechat-data-provider';
  *   options:
  *     language: "auto"    // "auto" or an ISO 639-1 language code (e.g. en)
  *     size: "normal"      // Options: "normal", "compact", "flexible", or "invisible"
+ *   managedChallenge: true  // Show the widget when Cloudflare challenges an API request
  *
  * @param config - The loaded custom configuration.
  * @param configDefaults - The custom configuration default values.
@@ -29,6 +30,9 @@ export function loadTurnstileConfig(
       customTurnstile?.siteKey ?? (defaults as TCustomConfig['turnstile'] | undefined)?.siteKey,
     options:
       customTurnstile?.options ?? (defaults as TCustomConfig['turnstile'] | undefined)?.options,
+    managedChallenge:
+      customTurnstile?.managedChallenge ??
+      (defaults as TCustomConfig['turnstile'] | undefined)?.managedChallenge,
   });
 
   const enabled = Boolean(loadedTurnstile.siteKey);

@@ -2,6 +2,11 @@
 import axios from 'axios';
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import type * as t from './types';
+import {
+  isCloudflareChallenge,
+  solveCloudflareChallenge,
+  CLOUDFLARE_CHALLENGE_TOKEN_HEADER,
+} from './cloudflareChallenge';
 import { TWO_FACTOR_ENROLLMENT_REQUIRED_CODE } from './config';
 import { persistTwoFactorSetupToken } from './twoFactor';
 import { setTokenHeader } from './headers-helpers';
@@ -73,7 +78,10 @@ const AUTH_REDIRECT_STORAGE_KEY = 'librechat.auth.redirect.startedAt';
 const AUTH_REDIRECT_DEDUPE_MS = 15_000;
 const TOKEN_REFRESH_BUFFER_MS = 2 * 60 * 1000;
 
-type RetryableAxiosRequestConfig = AxiosRequestConfig & { _retry?: boolean };
+type RetryableAxiosRequestConfig = AxiosRequestConfig & {
+  _retry?: boolean;
+  _cloudflareChallengeRetry?: boolean;
+};
 
 type AuthRecoveryState = {
   lastRedirectStartedAt: number;
@@ -427,13 +435,43 @@ const redirectIfTwoFactorSetupRequired = async (response: Response): Promise<boo
   );
 };
 
+/**
+ * Re-sends a fetch the Cloudflare edge answered with a managed challenge, once the user solves
+ * it. A body that is a stream was consumed by the first attempt and cannot be sent again.
+ */
+const retryCloudflareChallengedFetch = async (
+  response: Response,
+  url: string,
+  options: RequestInit,
+): Promise<Response> => {
+  if (
+    !isCloudflareChallenge(response.status, response.headers.get('cf-mitigated')) ||
+    (typeof ReadableStream !== 'undefined' && options.body instanceof ReadableStream)
+  ) {
+    return response;
+  }
+  const challengeToken = await solveCloudflareChallenge();
+  if (!challengeToken) {
+    return response;
+  }
+  await response.body?.cancel().catch(() => undefined);
+  const headers = new Headers(options.headers);
+  headers.set(CLOUDFLARE_CHALLENGE_TOKEN_HEADER, challengeToken);
+  return fetch(url, { ...options, headers });
+};
+
 async function _authenticatedFetch(url: string, options?: RequestInit): Promise<Response> {
   if (typeof window === 'undefined') {
     return fetch(url, options);
   }
 
   const token = (await refreshBeforeRequest(url)) ?? getBearerToken();
-  const response = await fetch(url, withAuthorization(options, token));
+  const requestOptions = withAuthorization(options, token);
+  const response = await retryCloudflareChallengedFetch(
+    await fetch(url, requestOptions),
+    url,
+    requestOptions,
+  );
   if (await redirectIfTwoFactorSetupRequired(response)) {
     return response;
   }
@@ -482,6 +520,22 @@ if (typeof window !== 'undefined') {
         return Promise.reject(error);
       }
       if (!originalRequest) {
+        return Promise.reject(error);
+      }
+
+      /** Ahead of the auth checks below: the edge challenges logged-out requests too. */
+      if (
+        !originalRequest._cloudflareChallengeRetry &&
+        isCloudflareChallenge(error.response.status, error.response.headers?.['cf-mitigated'])
+      ) {
+        originalRequest._cloudflareChallengeRetry = true;
+        const challengeToken = await solveCloudflareChallenge();
+        if (challengeToken) {
+          const headers = (originalRequest.headers ?? {}) as Record<string, string>;
+          headers[CLOUDFLARE_CHALLENGE_TOKEN_HEADER] = challengeToken;
+          originalRequest.headers = headers;
+          return axios(originalRequest);
+        }
         return Promise.reject(error);
       }
 

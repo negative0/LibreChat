@@ -420,6 +420,10 @@ interface:
 #  options:
 #    language: "auto"    # "auto" or an ISO 639-1 language code (e.g. en)
 #    size: "normal"      # Options: "normal", "compact", "flexible", or "invisible"
+#  # Behind a Cloudflare zone whose WAF answers API requests (e.g. file uploads) with a managed
+#  # challenge, show this widget when a request is challenged and retry it once solved. The widget
+#  # needs pre-clearance enabled (level "Managed" or higher) so solving it sets `cf_clearance`.
+#  managedChallenge: true
 
 # Example Registration Object Structure (optional)
 # Changing the registered email address from Settings > Account.
