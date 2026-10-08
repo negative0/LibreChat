@@ -10,7 +10,7 @@ import {
   processOpenIDPlaceholders,
   OpenIDReauthRequiredError,
 } from './oidc';
-import { getAdminApiKeyHeader } from '~/mcp/headers';
+import { injectHeaders, getAdminAuthHeaders, getAdminApiKeyHeader } from '~/mcp/headers';
 
 /**
  * Provenance marker for MCP servers contributed by an Agent Plugins package.
@@ -439,12 +439,15 @@ export function processMCPEnv(params: {
   const newObj: MCPOptions = structuredClone(options);
 
   const adminHeader = getAdminApiKeyHeader(newObj.apiKey);
-  if (adminHeader) {
+  const adminHeaders = getAdminAuthHeaders(newObj.authHeaders);
+  if (adminHeader || adminHeaders.length > 0) {
     const objWithHeaders = newObj as { headers?: Record<string, string> };
-    objWithHeaders.headers = {
-      ...objWithHeaders.headers,
-      [adminHeader.name]: adminHeader.value,
-    };
+    objWithHeaders.headers = injectHeaders(
+      adminHeader
+        ? { ...objWithHeaders.headers, [adminHeader.name]: adminHeader.value }
+        : objWithHeaders.headers,
+      adminHeaders,
+    );
   }
 
   if ('env' in newObj && newObj.env) {

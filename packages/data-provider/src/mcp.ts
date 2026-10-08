@@ -194,6 +194,80 @@ export const MCP_SERVER_TITLE_PATTERN = new RegExp(
 export const MCP_SERVER_TITLE_ERROR =
   'Title must start with a letter or number and can include spaces, hyphens, and apostrophes';
 
+/** Request-shape bound on `authHeaders`, enforced identically by the client form and the API. */
+export const MAX_MCP_AUTH_HEADERS = 20;
+
+/** Headers the transport owns; an auth header must not replace them. */
+const RESERVED_MCP_AUTH_HEADERS: ReadonlySet<string> = new Set([
+  'host',
+  'connection',
+  'content-type',
+  'content-length',
+  'transfer-encoding',
+  'mcp-session-id',
+  'mcp-protocol-version',
+]);
+
+/** RFC 9110 `token` grammar for field names. */
+const HTTP_HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/** `customUserVars` key holding a user's value for a per-user auth header. */
+export function getAuthHeaderVarName(headerName: string): string {
+  return `MCP_HEADER_${headerName.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+}
+
+/** Header name an `apiKey` config is sent under. */
+export function getApiKeyHeaderName(apiKey?: {
+  authorization_type?: 'basic' | 'bearer' | 'custom';
+  custom_header?: string;
+}): string {
+  return apiKey?.authorization_type === 'custom'
+    ? apiKey.custom_header || 'X-Api-Key'
+    : 'Authorization';
+}
+
+const AuthHeaderSchema = z.object({
+  /** HTTP header name */
+  name: z
+    .string()
+    .regex(HTTP_HEADER_NAME_PATTERN, 'Header name contains invalid characters')
+    .refine((name) => !RESERVED_MCP_AUTH_HEADERS.has(name.toLowerCase()), {
+      message: 'Header name is reserved',
+    }),
+  /** Header value (admin-provided only, stored encrypted). Omitted on update keeps the stored value. */
+  value: z
+    .string()
+    .refine((value) => !/[\r\n\0]/.test(value), {
+      message: 'Header value cannot contain line breaks',
+    })
+    .optional(),
+  /** Whether the value is provided by admin or by each user */
+  source: z.enum(['admin', 'user']),
+});
+
+export type MCPAuthHeader = z.infer<typeof AuthHeaderSchema>;
+
+const AuthHeadersSchema = z
+  .array(AuthHeaderSchema)
+  .max(MAX_MCP_AUTH_HEADERS)
+  .superRefine((headers, ctx) => {
+    const names = new Set<string>();
+    const varNames = new Set<string>();
+    headers.forEach(({ name }, index) => {
+      const lowered = name.toLowerCase();
+      const varName = getAuthHeaderVarName(name);
+      if (names.has(lowered) || varNames.has(varName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index, 'name'],
+          message: `Duplicate header name: ${name}`,
+        });
+      }
+      names.add(lowered);
+      varNames.add(varName);
+    });
+  });
+
 const BaseOptionsSchema = z.object({
   /** Display name for the MCP server */
   title: z.string().regex(MCP_SERVER_TITLE_PATTERN, MCP_SERVER_TITLE_ERROR).optional(),
@@ -277,6 +351,11 @@ const BaseOptionsSchema = z.object({
       custom_header: z.string().optional(),
     })
     .optional(),
+  /**
+   * Additional authentication headers, each provided by the admin (shared, stored encrypted)
+   * or by each user (prompted through a generated customUserVars entry).
+   */
+  authHeaders: AuthHeadersSchema.optional(),
   customUserVars: z
     .record(
       z.string(),
@@ -542,7 +621,7 @@ const userUrlSchema = (protocolCheck: (val: string) => boolean, message: string)
  * Protocol checks use positive allowlists (http(s) / ws(s)) to block
  * file://, ftp://, javascript:, and other non-network schemes.
  */
-export const MCPServerUserInputSchema = z.union([
+const MCPServerUserInputVariants = z.union([
   userManagedServerFields(WebSocketOptionsSchema).extend({
     url: userUrlSchema(isWsProtocol, 'WebSocket URL must use ws:// or wss://'),
   }),
@@ -555,6 +634,23 @@ export const MCPServerUserInputSchema = z.union([
     url: userUrlSchema(isHttpProtocol, 'Streamable HTTP URL must use http:// or https://'),
   }),
 ]);
+
+export const MCPServerUserInputSchema = MCPServerUserInputVariants.superRefine((config, ctx) => {
+  if (!config.apiKey || !config.authHeaders) {
+    return;
+  }
+  const apiKeyHeader = getApiKeyHeaderName(config.apiKey).toLowerCase();
+  const authHeaders: MCPAuthHeader[] = config.authHeaders;
+  authHeaders.forEach(({ name }, index) => {
+    if (name.toLowerCase() === apiKeyHeader) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['authHeaders', index, 'name'],
+        message: `Header ${name} is already set by the API key`,
+      });
+    }
+  });
+});
 
 export type MCPServerUserInput = z.infer<typeof MCPServerUserInputSchema>;
 
@@ -574,7 +670,7 @@ export type MCPServerUserInput = z.infer<typeof MCPServerUserInputSchema>;
  */
 export const MCP_USER_INPUT_FIELDS: ReadonlySet<string> = (() => {
   const fields = new Set<string>();
-  for (const variant of MCPServerUserInputSchema.options) {
+  for (const variant of MCPServerUserInputVariants.options) {
     const shape = (variant as unknown as { shape: Record<string, unknown> }).shape;
     for (const key of Object.keys(shape)) {
       fields.add(key);

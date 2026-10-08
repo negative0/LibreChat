@@ -2,6 +2,7 @@ import { useEffect, useMemo, useCallback, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useToastContext } from '@librechat/client';
 import type { MCPServerCreateParams, TokenExchangeMethodEnum } from 'librechat-data-provider';
+import type { AuthHeaderFormValue } from '../utils/headers';
 import type { MCPServerDefinition } from '~/hooks';
 import {
   useCreateMCPServerMutation,
@@ -9,6 +10,7 @@ import {
   useDeleteMCPServerMutation,
 } from '~/data-provider/MCP';
 import { extractServerNameFromUrl, isValidUrl, normalizeUrl } from '../utils/urlUtils';
+import { getAuthHeadersConfig, toAuthHeaderFormValues } from '../utils/headers';
 import { getMCPServerErrorMessage } from '../utils/error';
 import { getOAuthConfig } from '../utils/oauth';
 import { useLocalize } from '~/hooks';
@@ -35,6 +37,7 @@ export interface AuthConfig {
   api_key_source?: 'admin' | 'user';
   api_key_authorization_type?: AuthorizationTypeEnum;
   api_key_custom_header?: string;
+  auth_headers?: AuthHeaderFormValue[];
   oauth_client_id?: string;
   oauth_client_secret?: string;
   oauth_authorization_url?: string;
@@ -106,6 +109,9 @@ export function useMCPServerForm({ server, onSuccess, onClose }: UseMCPServerFor
             (apiKeyConfig?.authorization_type as AuthorizationTypeEnum) ||
             AuthorizationTypeEnum.Bearer,
           api_key_custom_header: apiKeyConfig?.custom_header || '',
+          auth_headers: toAuthHeaderFormValues(
+            'authHeaders' in server.config ? server.config.authHeaders : undefined,
+          ),
           oauth_client_id: server.config.oauth?.client_id || '',
           oauth_client_secret: '', // Never pre-fill secrets
           oauth_authorization_url: server.config.oauth?.authorization_url || '',
@@ -131,6 +137,7 @@ export function useMCPServerForm({ server, onSuccess, onClose }: UseMCPServerFor
         api_key_source: 'admin',
         api_key_authorization_type: AuthorizationTypeEnum.Bearer,
         api_key_custom_header: '',
+        auth_headers: [],
         oauth_client_id: '',
         oauth_client_secret: '',
         oauth_authorization_url: '',
@@ -213,6 +220,11 @@ export function useMCPServerForm({ server, onSuccess, onClose }: UseMCPServerFor
               custom_header: formData.auth.api_key_custom_header,
             }),
         };
+      }
+
+      const authHeaders = getAuthHeadersConfig(formData.auth);
+      if (authHeaders) {
+        config.authHeaders = authHeaders;
       }
 
       if (formData.auth.auth_type === AuthTypeEnum.OBO && formData.auth.obo_scopes) {

@@ -10,7 +10,11 @@ import {
 import type { AgentToolOptions, MCPOptions } from 'librechat-data-provider';
 import type { ParsedServerConfig } from '~/mcp/types';
 import type { RequestBody } from '~/types';
-import { isApiKeyHeaderOverridden, isGeneratedUserApiKeyVariable } from './headers';
+import {
+  getEffectiveAuthHeaders,
+  isApiKeyHeaderOverridden,
+  getShadowedGeneratedVars,
+} from './headers';
 import { isDirectOpenIDBearerRecoveryEnabled } from '~/mcp/openid';
 import { ALLOWED_BODY_FIELDS, isPluginSourced } from '~/utils/env';
 import { isEnabled } from '~/utils/common';
@@ -218,6 +222,9 @@ type UserScopedConnectionConfig = Pick<
   /** Loosened like the fields below: raw (pre-inspection) configs carry
    *  optional API-key fields, and the gating predicates only inspect them. */
   apiKey?: Partial<NonNullable<ParsedServerConfig['apiKey']>> | null;
+  authHeaders?: ReadonlyArray<
+    Partial<NonNullable<ParsedServerConfig['authHeaders']>[number]>
+  > | null;
   args?: string[];
   /** Loosened from the parsed shapes so raw (pre-inspection) configs qualify;
    *  scoping predicates only check key presence */
@@ -252,6 +259,7 @@ function mergeHeaderMaps<T extends string | undefined>(
 function placeholderBearingFields(config: UserScopedConnectionConfig): PlaceholderValue[] {
   return [
     isApiKeyHeaderOverridden(config.apiKey, config.requestHeaders) ? undefined : config.apiKey?.key,
+    getEffectiveAuthHeaders(config.authHeaders, config.requestHeaders)?.map(({ value }) => value),
     config.args,
     config.env,
     config.requestHeaders == null
@@ -294,20 +302,17 @@ export function requiresOAuthMachinery(config: ParsedServerConfig): boolean {
 /** Required chat credentials, retaining explicit variables and any still-used generated key. */
 function requiredCustomUserVars(config: UserScopedConnectionConfig): string[] {
   const keys = Object.keys(config.customUserVars ?? {});
-  if (
-    config.apiKey?.source !== 'user' ||
-    !isApiKeyHeaderOverridden(config.apiKey, config.requestHeaders)
-  ) {
+  const shadowed = getShadowedGeneratedVars(config);
+  if (shadowed.length === 0) {
     return keys;
   }
   const fields = placeholderBearingFields(config);
-  return keys.filter((key) => {
-    if (!isGeneratedUserApiKeyVariable(key)) {
-      return true;
-    }
-    const pattern = new RegExp(`\\{\\{${key}\\}\\}`);
-    return fields.some((value) => hasPlaceholder(value, pattern));
-  });
+  const unused = new Set(
+    shadowed.filter(
+      (key) => !fields.some((value) => hasPlaceholder(value, new RegExp(`\\{\\{${key}\\}\\}`))),
+    ),
+  );
+  return keys.filter((key) => !unused.has(key));
 }
 
 /** Checks the effective chat requirements, without weakening catalog-only credentials. */
@@ -440,6 +445,9 @@ export function applyRequestHeaders<T extends MCPOptions>(config: T): T {
   if (carrier.apiKey && isApiKeyHeaderOverridden(carrier.apiKey, carrier.requestHeaders)) {
     /** Keep the explicit auth mode, but disarm its lower-priority header injection. */
     merged.apiKey = { ...carrier.apiKey, key: undefined };
+  }
+  if (carrier.authHeaders) {
+    merged.authHeaders = getEffectiveAuthHeaders(carrier.authHeaders, carrier.requestHeaders);
   }
   if (carrier.customUserVars) {
     const required = new Set(requiredCustomUserVars(carrier));
@@ -650,7 +658,8 @@ export function canBackfillSharedServerInstructions(config: UserScopedConnection
      *  `isOAuthServer` still arms the OAuth machinery for the unstamped case. */
     config.oauth == null &&
     config.oauth_headers == null &&
-    config.apiKey?.source !== 'user'
+    config.apiKey?.source !== 'user' &&
+    !config.authHeaders?.some(({ source }) => source === 'user')
   );
 }
 
@@ -750,6 +759,10 @@ export function redactServerSecrets(
       authorization_type: config.apiKey.authorization_type,
       ...(config.apiKey.custom_header && { custom_header: config.apiKey.custom_header }),
     };
+  }
+
+  if (config.authHeaders) {
+    safe.authHeaders = config.authHeaders.map(({ name, source }) => ({ name, source }));
   }
 
   if (config.oauth) {

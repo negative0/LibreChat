@@ -20,6 +20,7 @@ import type { ParsedServerConfig } from '~/mcp/types';
  */
 const UNREAD_BY_DOMAIN_VALIDATION = [
   'apiKey',
+  'authHeaders',
   'args',
   'env',
   'headers',

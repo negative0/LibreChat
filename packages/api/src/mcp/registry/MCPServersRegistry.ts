@@ -14,12 +14,12 @@ import {
   APP_CACHE_NAMESPACE,
   CONFIG_CACHE_NAMESPACE,
 } from './cache/ServerConfigsCacheFactory';
+import { mergeRetainedAuthHeaderValues, requireApiKeyReentryForRebinding } from './binding';
 import { MCPInspectionFailedError, isMCPDomainNotAllowedError } from '~/mcp/errors';
 import { normalizeLegacyHeaderMaps, normalizeLegacyHeaderMapsIn } from './compat';
 import { canBackfillSharedServerInstructions, isUserSourced } from '~/mcp/utils';
 import { ReadThroughAllCache } from './cache/ReadThroughAllCache';
 import { isPluginSourced, MCP_PLUGIN_SOURCE } from '~/utils/env';
-import { requireApiKeyReentryForRebinding } from './binding';
 import { ReadThroughCache } from './cache/ReadThroughCache';
 import { MCPServerInspector } from './MCPServerInspector';
 import { ServerConfigsDB } from './db/ServerConfigsDB';
@@ -125,6 +125,7 @@ const ADMIN_CONFIGURABLE_FIELDS = [
   'proxy',
   'requiresOAuth',
   'apiKey',
+  'authHeaders',
   'oauth',
   'oauth_headers',
   'obo',
@@ -1015,18 +1016,30 @@ export class MCPServersRegistry {
     const configRepo = this.getConfigRepository(storageLocation);
     const source = resolveServerSource(config, storageLocation === 'CACHE' ? 'yaml' : 'user');
 
-    // Merge an equivalent update's existing admin API key for inspection.
+    // Merge an equivalent update's existing admin credentials for inspection.
     let configForInspection = { ...config };
-    if (config.apiKey?.source === 'admin' && !config.apiKey?.key) {
+    const omitsAdminKey = config.apiKey?.source === 'admin' && !config.apiKey?.key;
+    const omitsAdminHeaders = !!config.authHeaders?.some(
+      ({ source, value }) => source === 'admin' && !value,
+    );
+    if (omitsAdminKey || omitsAdminHeaders) {
       const existingConfig = await configRepo.get(serverName, userId);
-      if (existingConfig?.apiKey?.key) {
+      if (existingConfig) {
         requireApiKeyReentryForRebinding(existingConfig, config);
+      }
+      if (omitsAdminKey && existingConfig?.apiKey?.key) {
         configForInspection = {
           ...configForInspection,
           apiKey: {
             ...configForInspection.apiKey!,
             key: existingConfig.apiKey.key,
           },
+        };
+      }
+      if (omitsAdminHeaders) {
+        configForInspection = {
+          ...configForInspection,
+          authHeaders: mergeRetainedAuthHeaderValues(existingConfig, config),
         };
       }
     }

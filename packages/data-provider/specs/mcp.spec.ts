@@ -4,6 +4,8 @@ import {
   StreamableHTTPOptionsSchema,
   MCPServerUserInputSchema,
   MCP_USER_INPUT_FIELDS,
+  MAX_MCP_AUTH_HEADERS,
+  getAuthHeaderVarName,
   MAX_MCP_ICON_PATH_LENGTH,
 } from '../src/mcp';
 
@@ -869,6 +871,7 @@ describe('MCP_USER_INPUT_FIELDS', () => {
     expect(MCP_USER_INPUT_FIELDS.has('iconPath')).toBe(true);
     expect(MCP_USER_INPUT_FIELDS.has('oauth')).toBe(true);
     expect(MCP_USER_INPUT_FIELDS.has('apiKey')).toBe(true);
+    expect(MCP_USER_INPUT_FIELDS.has('authHeaders')).toBe(true);
     expect(MCP_USER_INPUT_FIELDS.has('obo')).toBe(true);
     expect(MCP_USER_INPUT_FIELDS.has('proxy')).toBe(true);
     expect(MCP_USER_INPUT_FIELDS.has('headers')).toBe(true);
@@ -920,5 +923,67 @@ describe('OAuth coordination rollout configuration', () => {
     });
     expect(user).not.toHaveProperty('oauthRefreshCoordination');
     expect(user).not.toHaveProperty('oauthPersistenceWaitTimeout');
+  });
+});
+
+describe('MCP auth headers', () => {
+  const base = {
+    type: 'streamable-http',
+    url: 'https://mcp.example.com/mcp',
+    apiKey: { source: 'admin', authorization_type: 'bearer', key: 'primary' },
+  };
+  const parse = (authHeaders: unknown, extra: Record<string, unknown> = {}) =>
+    MCPServerUserInputSchema.safeParse({ ...base, ...extra, authHeaders });
+
+  it('accepts admin and user headers next to the API key', () => {
+    const result = parse([
+      { name: 'X-Org-Id', source: 'admin', value: 'org-123' },
+      { name: 'X-User-Token', source: 'user' },
+    ]);
+    expect(result.success).toBe(true);
+  });
+
+  it.each([
+    ['an invalid header name', [{ name: 'X Org', source: 'admin', value: 'v' }]],
+    ['a reserved header name', [{ name: 'Host', source: 'admin', value: 'v' }]],
+    ['a value with a line break', [{ name: 'X-Org', source: 'admin', value: 'a\r\nX-Evil: 1' }]],
+    [
+      'a case-insensitive duplicate',
+      [
+        { name: 'X-Org', source: 'admin', value: 'a' },
+        { name: 'x-org', source: 'user' },
+      ],
+    ],
+    [
+      'names that generate the same user variable',
+      [
+        { name: 'X-Org', source: 'user' },
+        { name: 'X_Org', source: 'user' },
+      ],
+    ],
+    ['the header the API key already sets', [{ name: 'authorization', source: 'user' }]],
+  ])('rejects %s', (_label, authHeaders) => {
+    expect(parse(authHeaders).success).toBe(false);
+  });
+
+  it('rejects a header that collides with a custom API key header', () => {
+    const result = parse([{ name: 'x-api-key', source: 'admin', value: 'v' }], {
+      apiKey: { source: 'user', authorization_type: 'custom' },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it(`rejects more than ${MAX_MCP_AUTH_HEADERS} headers`, () => {
+    const headers = Array.from({ length: MAX_MCP_AUTH_HEADERS + 1 }, (_, i) => ({
+      name: `X-Header-${i}`,
+      source: 'user',
+    }));
+    expect(parse(headers).success).toBe(false);
+    expect(parse(headers.slice(0, MAX_MCP_AUTH_HEADERS)).success).toBe(true);
+  });
+
+  it('derives a stable customUserVars key from the header name', () => {
+    expect(getAuthHeaderVarName('X-Org-Id')).toBe('MCP_HEADER_X_ORG_ID');
+    expect(getAuthHeaderVarName('x.client~id')).toBe('MCP_HEADER_X_CLIENT_ID');
   });
 });

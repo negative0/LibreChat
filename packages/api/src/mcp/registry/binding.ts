@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
+import { getAuthHeaderVarName } from 'librechat-data-provider';
 import type { MCPOptions } from '~/mcp/types';
-import { isGeneratedUserApiKeyVariable } from '~/mcp/headers';
+import { isGeneratedAuthHeaderVariable, isGeneratedUserApiKeyVariable } from '~/mcp/headers';
 import { MCPApiKeyReentryRequiredError } from '~/mcp/errors';
 
 function getUrl(config: MCPOptions): string | undefined {
@@ -48,7 +49,50 @@ function apiKeyBinding(config: MCPOptions): Record<string, string | undefined> {
   };
 }
 
-/** Returns fields that would move an omitted, stored admin key to a new request boundary. */
+const DESTINATION_BINDING_FIELDS = new Set(['url', 'type', 'proxy']);
+
+/** Lowercased names of admin auth headers an update omits and the stored config can supply. */
+function getRetainedAuthHeaderNames(
+  existingConfig: MCPOptions,
+  updatedConfig: MCPOptions,
+): string[] {
+  const stored = new Set(
+    (existingConfig.authHeaders ?? [])
+      .filter(({ source, value }) => source === 'admin' && !!value)
+      .map(({ name }) => name.toLowerCase()),
+  );
+  return (updatedConfig.authHeaders ?? [])
+    .filter(({ source, value }) => source === 'admin' && !value)
+    .map(({ name }) => name.toLowerCase())
+    .filter((name) => stored.has(name));
+}
+
+/**
+ * Fills admin auth header values an update omits from the stored config, matching names
+ * case-insensitively. Rows with no value to fall back on are left as submitted.
+ */
+export function mergeRetainedAuthHeaderValues(
+  existingConfig: MCPOptions | undefined,
+  updatedConfig: MCPOptions,
+): MCPOptions['authHeaders'] {
+  if (!updatedConfig.authHeaders) {
+    return updatedConfig.authHeaders;
+  }
+  const stored = new Map(
+    (existingConfig?.authHeaders ?? [])
+      .filter(({ source, value }) => source === 'admin' && !!value)
+      .map(({ name, value }) => [name.toLowerCase(), value] as const),
+  );
+  return updatedConfig.authHeaders.map((header) => {
+    const storedValue = stored.get(header.name.toLowerCase());
+    if (header.source !== 'admin' || header.value || !storedValue) {
+      return header;
+    }
+    return { ...header, value: storedValue };
+  });
+}
+
+/** Returns fields that would move an omitted, stored admin credential to a new request boundary. */
 export function getChangedApiKeyBindingFields(
   existingConfig: MCPOptions,
   updatedConfig: MCPOptions,
@@ -58,14 +102,20 @@ export function getChangedApiKeyBindingFields(
     !!existingConfig.apiKey.key &&
     updatedConfig.apiKey?.source === 'admin' &&
     !updatedConfig.apiKey.key;
+  const preservesStoredHeaders =
+    getRetainedAuthHeaderNames(existingConfig, updatedConfig).length > 0;
 
-  if (!preservesStoredKey) {
+  if (!preservesStoredKey && !preservesStoredHeaders) {
     return [];
   }
 
   const existing = apiKeyBinding(existingConfig);
   const updated = apiKeyBinding(updatedConfig);
-  return Object.keys(existing).filter((field) => existing[field] !== updated[field]);
+  return Object.keys(existing).filter(
+    (field) =>
+      (preservesStoredKey || DESTINATION_BINDING_FIELDS.has(field)) &&
+      existing[field] !== updated[field],
+  );
 }
 
 function userApiKeyBinding(config: MCPOptions): string {
@@ -94,6 +144,47 @@ export function getUserApiKeyVariable(config: MCPOptions, existingConfig?: MCPOp
     }
   }
   return `MCP_API_KEY_${createHash('sha256').update(binding).digest('hex')}`;
+}
+
+function userAuthHeaderBinding(config: MCPOptions, headerName: string): string {
+  return JSON.stringify([
+    normalizeUrl(getUrl(config), true),
+    normalizeTransport(config.type),
+    normalizeUrl(getProxy(config), true),
+    normalizeUrl(config.oauth?.authorization_url, true),
+    normalizeUrl(config.oauth?.token_url, true),
+    normalizeUrl(config.oauth?.redirect_uri),
+    normalizeUrl(config.oauth?.revocation_endpoint, true),
+    config.oauth?.client_id,
+    headerName.toLowerCase(),
+  ]);
+}
+
+/** Binds each user's value for a per-user auth header to the request destination, the same way
+ *  `getUserApiKeyVariable` does, keeping the stored field name only for an equivalent boundary. */
+export function getUserAuthHeaderVariable(
+  headerName: string,
+  config: MCPOptions,
+  existingConfig?: MCPOptions,
+): string {
+  const binding = userAuthHeaderBinding(config, headerName);
+  const lowered = headerName.toLowerCase();
+  const wasUserHeader = existingConfig?.authHeaders?.some(
+    ({ name, source }) => source === 'user' && name.toLowerCase() === lowered,
+  );
+  if (
+    existingConfig &&
+    wasUserHeader &&
+    binding === userAuthHeaderBinding(existingConfig, headerName)
+  ) {
+    const variable = Object.keys(existingConfig.customUserVars ?? {}).find((name) =>
+      isGeneratedAuthHeaderVariable(name, headerName),
+    );
+    if (variable) {
+      return variable;
+    }
+  }
+  return `${getAuthHeaderVarName(headerName)}_${createHash('sha256').update(binding).digest('hex')}`;
 }
 
 /** Requires a replacement key before a stored admin credential can cross request boundaries. */

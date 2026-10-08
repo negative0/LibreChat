@@ -1242,6 +1242,170 @@ describe('ServerConfigsDB', () => {
     });
   });
 
+  describe('additional auth headers', () => {
+    type HeaderedConfig = ParsedServerConfig & { headers?: Record<string, string> };
+
+    const createHeaderConfig = (
+      authHeaders: ParsedServerConfig['authHeaders'],
+      url = 'https://example.com/mcp',
+    ): ParsedServerConfig => ({
+      type: 'sse',
+      url,
+      title: 'Multi Header Server',
+      apiKey: { source: 'admin', authorization_type: 'bearer', key: 'primary-key' },
+      authHeaders,
+    });
+
+    it('encrypts admin header values at rest and decrypts them on read', async () => {
+      const created = await serverConfigsDB.add(
+        'temp-name',
+        createHeaderConfig([{ name: 'X-Org-Id', source: 'admin', value: 'org-123' }]),
+        userId,
+      );
+
+      const stored = await mongoose.models.MCPServer.findOne({ serverName: created.serverName });
+      expect(stored?.config?.authHeaders[0].value).not.toBe('org-123');
+
+      const retrieved = await serverConfigsDB.get(created.serverName, userId);
+      expect(retrieved?.authHeaders).toEqual([
+        { name: 'X-Org-Id', source: 'admin', value: 'org-123' },
+      ]);
+    });
+
+    it('turns user headers into customUserVars-backed header templates', async () => {
+      const created = await serverConfigsDB.add(
+        'temp-name',
+        createHeaderConfig([
+          { name: 'X-Org-Id', source: 'admin', value: 'org-123' },
+          { name: 'X-User-Token', source: 'user', value: 'must-not-be-stored' },
+        ]),
+        userId,
+      );
+
+      const retrieved = (await serverConfigsDB.get(created.serverName, userId)) as HeaderedConfig;
+      const [variable] = Object.keys(retrieved.customUserVars ?? {});
+      expect(variable).toMatch(/^MCP_HEADER_X_USER_TOKEN_[a-f0-9]{64}$/);
+      expect(retrieved.headers).toEqual({ 'X-User-Token': `{{${variable}}}` });
+      expect(retrieved.customUserVars?.[variable]).toEqual({
+        title: 'X-User-Token',
+        description: 'Your value for the X-User-Token header',
+      });
+      expect(retrieved.authHeaders).toEqual([
+        { name: 'X-Org-Id', source: 'admin', value: 'org-123' },
+        { name: 'X-User-Token', source: 'user' },
+      ]);
+    });
+
+    it('keeps a stored admin value when an update omits it, matching names case-insensitively', async () => {
+      const created = await serverConfigsDB.add(
+        'temp-name',
+        createHeaderConfig([{ name: 'X-Org-Id', source: 'admin', value: 'org-123' }]),
+        userId,
+      );
+
+      await serverConfigsDB.update(
+        created.serverName,
+        {
+          ...createHeaderConfig([
+            { name: 'x-org-id', source: 'admin' },
+            { name: 'X-Tenant', source: 'admin', value: 'tenant-1' },
+          ]),
+          apiKey: { source: 'admin', authorization_type: 'bearer' },
+        },
+        userId,
+      );
+
+      const retrieved = await serverConfigsDB.get(created.serverName, userId);
+      expect(retrieved?.apiKey?.key).toBe('primary-key');
+      expect(retrieved?.authHeaders).toEqual([
+        { name: 'x-org-id', source: 'admin', value: 'org-123' },
+        { name: 'X-Tenant', source: 'admin', value: 'tenant-1' },
+      ]);
+    });
+
+    it('drops an admin header that has neither a submitted nor a stored value', async () => {
+      const created = await serverConfigsDB.add(
+        'temp-name',
+        createHeaderConfig([{ name: 'X-Empty', source: 'admin' }]),
+        userId,
+      );
+
+      const retrieved = await serverConfigsDB.get(created.serverName, userId);
+      expect(retrieved?.authHeaders).toEqual([]);
+    });
+
+    it('does not carry a stored admin value into a header switched to user-provided', async () => {
+      const created = await serverConfigsDB.add(
+        'temp-name',
+        createHeaderConfig([{ name: 'X-Org-Id', source: 'admin', value: 'org-123' }]),
+        userId,
+      );
+
+      await serverConfigsDB.update(
+        created.serverName,
+        createHeaderConfig([{ name: 'X-Org-Id', source: 'user' }]),
+        userId,
+      );
+
+      const retrieved = (await serverConfigsDB.get(created.serverName, userId)) as HeaderedConfig;
+      expect(retrieved.authHeaders).toEqual([{ name: 'X-Org-Id', source: 'user' }]);
+      expect(retrieved.headers?.['X-Org-Id']).toMatch(/^\{\{MCP_HEADER_X_ORG_ID_[a-f0-9]{64}\}\}$/);
+    });
+
+    it('binds per-user header values to the destination, keeping the name for equivalent saves', async () => {
+      const userHeaders: ParsedServerConfig['authHeaders'] = [
+        { name: 'X-User-Token', source: 'user' },
+      ];
+      const created = await serverConfigsDB.add(
+        'temp-name',
+        createHeaderConfig(userHeaders),
+        userId,
+      );
+      const variableOf = async () =>
+        Object.keys((await serverConfigsDB.get(created.serverName, userId))?.customUserVars ?? {});
+      const [original] = await variableOf();
+
+      await serverConfigsDB.update(
+        created.serverName,
+        { ...createHeaderConfig(userHeaders), description: 'Cosmetic change' },
+        userId,
+      );
+      expect(await variableOf()).toEqual([original]);
+
+      await serverConfigsDB.update(
+        created.serverName,
+        createHeaderConfig(userHeaders, 'https://elsewhere.example.com/mcp'),
+        userId,
+      );
+      const rotated = await variableOf();
+      expect(rotated).toHaveLength(1);
+      expect(rotated[0]).toMatch(/^MCP_HEADER_X_USER_TOKEN_[a-f0-9]{64}$/);
+      expect(rotated[0]).not.toBe(original);
+    });
+
+    it('requires re-entry before a retained admin value is sent to a new URL', async () => {
+      const created = await serverConfigsDB.add(
+        'temp-name',
+        createHeaderConfig([{ name: 'X-Org-Id', source: 'admin', value: 'org-123' }]),
+        userId,
+      );
+
+      await expect(
+        serverConfigsDB.update(
+          created.serverName,
+          createHeaderConfig(
+            [{ name: 'X-Org-Id', source: 'admin' }],
+            'https://attacker.example.com/mcp',
+          ),
+          userId,
+        ),
+      ).rejects.toMatchObject({ code: 'MCP_API_KEY_REENTRY_REQUIRED', changedFields: ['url'] });
+
+      const retrieved = await serverConfigsDB.get(created.serverName, userId);
+      expect(retrieved?.authHeaders?.[0].value).toBe('org-123');
+    });
+  });
+
   describe('credential placeholder sanitization', () => {
     it('should strip LIBRECHAT_OPENID placeholders from headers on add()', async () => {
       const config: ParsedServerConfig & { headers?: Record<string, string> } = {

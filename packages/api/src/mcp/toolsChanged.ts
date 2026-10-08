@@ -42,7 +42,12 @@ export function getMCPAppToolsPublicationGeneration(config: ParsedServerConfig):
   let runtimeConfig = processMCPEnv({ options: config });
   if ('requestHeaders' in config && config.requestHeaders != null) {
     const requestConfig = processMCPEnv({
-      options: { ...config, apiKey: undefined, headers: config.requestHeaders },
+      options: {
+        ...config,
+        apiKey: undefined,
+        authHeaders: undefined,
+        headers: config.requestHeaders,
+      },
     });
     if ('headers' in requestConfig && 'requestHeaders' in runtimeConfig) {
       runtimeConfig = { ...runtimeConfig, requestHeaders: requestConfig.headers };

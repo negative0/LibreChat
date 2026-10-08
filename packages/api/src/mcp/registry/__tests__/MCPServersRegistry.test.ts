@@ -1001,6 +1001,52 @@ describe('MCPServersRegistry', () => {
         undefined,
       );
     });
+
+    it('merges omitted admin auth header values into inspection and guards their binding', async () => {
+      const existingConfig: t.MCPOptions = {
+        type: 'streamable-http',
+        url: 'https://mcp.example.com/mcp',
+        authHeaders: [
+          { name: 'X-Org-Id', source: 'admin', value: 'org-secret' },
+          { name: 'X-User-Token', source: 'user' },
+        ],
+      };
+      const update: t.MCPOptions = {
+        ...existingConfig,
+        authHeaders: [
+          { name: 'x-org-id', source: 'admin' },
+          { name: 'X-User-Token', source: 'user' },
+        ],
+      };
+      jest.spyOn(registry['dbConfigsRepo'], 'get').mockResolvedValue(existingConfig);
+      const inspectSpy = jest.mocked(MCPServerInspector.inspect);
+      inspectSpy.mockClear();
+
+      await registry.inspectServerUpdate('shared-server', update, 'DB', 'editor-user');
+      expect(inspectSpy).toHaveBeenCalledWith(
+        'shared-server',
+        expect.objectContaining({
+          authHeaders: [
+            { name: 'x-org-id', source: 'admin', value: 'org-secret' },
+            { name: 'X-User-Token', source: 'user' },
+          ],
+        }),
+        undefined,
+        undefined,
+        undefined,
+      );
+
+      inspectSpy.mockClear();
+      await expect(
+        registry.inspectServerUpdate(
+          'shared-server',
+          { ...update, url: 'https://attacker.example.com/mcp' },
+          'DB',
+          'editor-user',
+        ),
+      ).rejects.toMatchObject({ code: 'MCP_API_KEY_REENTRY_REQUIRED', changedFields: ['url'] });
+      expect(inspectSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('reinspectServer', () => {

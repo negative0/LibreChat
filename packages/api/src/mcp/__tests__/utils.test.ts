@@ -1646,3 +1646,55 @@ describe.each(['MCP_API_KEY', `MCP_API_KEY_${'a'.repeat(64)}`])(
     });
   },
 );
+
+describe('shadowed generated auth header values', () => {
+  const variable = `MCP_HEADER_X_USER_TOKEN_${'b'.repeat(64)}`;
+  const config: ParsedServerConfig = {
+    type: 'streamable-http',
+    url: 'https://mcp.example.test/mcp',
+    headers: { 'X-User-Token': `{{${variable}}}` },
+    requestHeaders: { 'x-user-token': 'request-token' },
+    authHeaders: [
+      { name: 'X-User-Token', source: 'user' },
+      { name: 'X-Org-Id', source: 'admin', value: 'org-123' },
+    ],
+    customUserVars: {
+      [variable]: { title: 'X-User-Token', description: 'Generated' },
+    },
+  };
+
+  it('stops requiring a per-user header value the request map overrides', () => {
+    expect(hasCustomUserVars(config)).toBe(false);
+    expect(getMissingCustomUserVars(config)).toEqual([]);
+    expect(getMissingCustomUserVars(toCatalogConnectionConfig(config))).toEqual([variable]);
+  });
+
+  it('drops an admin header the request map overrides so it cannot be injected', () => {
+    const effective = applyRequestHeaders({
+      ...config,
+      requestHeaders: { 'x-org-id': 'request-org' },
+    });
+    expect(effective.authHeaders).toEqual([{ name: 'X-User-Token', source: 'user' }]);
+  });
+});
+
+describe('redactServerSecrets auth headers', () => {
+  it('returns header names and sources but never values', () => {
+    const redacted = redactServerSecrets(
+      {
+        type: 'streamable-http',
+        url: 'https://mcp.example.test/mcp',
+        authHeaders: [
+          { name: 'X-Org-Id', source: 'admin', value: 'org-secret' },
+          { name: 'X-User-Token', source: 'user' },
+        ],
+      },
+      { canEdit: true },
+    );
+    expect(redacted.authHeaders).toEqual([
+      { name: 'X-Org-Id', source: 'admin' },
+      { name: 'X-User-Token', source: 'user' },
+    ]);
+    expect(JSON.stringify(redacted)).not.toContain('org-secret');
+  });
+});

@@ -1861,6 +1861,58 @@ describe('processMCPEnv', () => {
         throw new Error('Expected streamable-http options');
       }
     });
+
+    it('should inject admin auth headers alongside the API key header', () => {
+      const options: MCPOptions = {
+        type: 'streamable-http',
+        url: 'https://api.example.com',
+        headers: { 'x-org-id': 'stale-org', 'X-Keep': 'kept' },
+        apiKey: { source: 'admin', authorization_type: 'bearer', key: 'primary-key' },
+        authHeaders: [
+          { name: 'X-Org-Id', source: 'admin', value: 'org-123' },
+          { name: 'X-Tenant', source: 'admin', value: 'tenant-1' },
+          { name: 'X-User-Token', source: 'user' },
+        ],
+      };
+
+      const result = processMCPEnv({ options });
+
+      if (!isStreamableHTTPOptions(result)) {
+        throw new Error('Expected streamable-http options');
+      }
+      expect(result.headers).toEqual({
+        Authorization: 'Bearer primary-key',
+        'X-Keep': 'kept',
+        'X-Org-Id': 'org-123',
+        'X-Tenant': 'tenant-1',
+      });
+    });
+
+    it('should resolve per-user auth header templates from customUserVars on DB-sourced configs', () => {
+      const options: MCPOptions = {
+        type: 'streamable-http',
+        url: 'https://api.example.com',
+        headers: { 'X-User-Token': '{{MCP_HEADER_X_USER_TOKEN}}' },
+        authHeaders: [
+          { name: 'X-Org-Id', source: 'admin', value: 'org-123' },
+          { name: 'X-User-Token', source: 'user' },
+        ],
+        customUserVars: {
+          MCP_HEADER_X_USER_TOKEN: { title: 'X-User-Token', description: 'Token' },
+        },
+      };
+
+      const result = processMCPEnv({
+        options,
+        dbSourced: true,
+        customUserVars: { MCP_HEADER_X_USER_TOKEN: 'user-token' },
+      });
+
+      if (!isStreamableHTTPOptions(result)) {
+        throw new Error('Expected streamable-http options');
+      }
+      expect(result.headers).toEqual({ 'X-User-Token': 'user-token', 'X-Org-Id': 'org-123' });
+    });
   });
 
   describe('dbSourced flag', () => {

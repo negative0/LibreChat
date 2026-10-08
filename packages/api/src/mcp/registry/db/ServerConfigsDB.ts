@@ -10,11 +10,16 @@ import type { AllMethods, MCPServerDocument, IAgent } from '@librechat/data-sche
 import type { IServerConfigsRepositoryInterface } from '~/mcp/registry/ServerConfigsRepositoryInterface';
 import type { ParsedServerConfig, AddServerResult } from '~/mcp/types';
 import type { ResolvedPrincipal } from '~/types/principal';
-import { getUserApiKeyVariable, requireApiKeyReentryForRebinding } from '~/mcp/registry/binding';
+import {
+  getUserApiKeyVariable,
+  getUserAuthHeaderVariable,
+  mergeRetainedAuthHeaderValues,
+  requireApiKeyReentryForRebinding,
+} from '~/mcp/registry/binding';
+import { isGeneratedAuthHeaderVariable, isGeneratedUserApiKeyVariable } from '~/mcp/headers';
 import { normalizeLegacyHeaderMaps } from '~/mcp/registry/compat';
 import { MCPOAuthSecretReentryRequiredError } from '~/mcp/errors';
 import { AccessControlService } from '~/acl/accessControlService';
-import { isGeneratedUserApiKeyVariable } from '~/mcp/headers';
 
 /**
  * Regex patterns for credential/env placeholders that should not be allowed in user-provided configs.
@@ -234,6 +239,36 @@ function unionMCPServerNames(
   return Array.from(serverNames);
 }
 
+type AuthHeader = NonNullable<ParsedServerConfig['authHeaders']>[number];
+
+/** Admin auth headers without a value (nothing submitted, nothing stored) would send an empty header. */
+function dropUnsetAdminAuthHeaders(config: ParsedServerConfig): ParsedServerConfig {
+  if (!config.authHeaders) {
+    return config;
+  }
+  return {
+    ...config,
+    authHeaders: config.authHeaders.filter(({ source, value }) => source !== 'admin' || !!value),
+  };
+}
+
+/** Decrypts an admin auth header value, dropping the value when decryption fails. */
+async function decryptAuthHeader(header: AuthHeader): Promise<AuthHeader> {
+  if (header.source !== 'admin' || !header.value) {
+    return header;
+  }
+  try {
+    return { ...header, value: await decryptV2(header.value) };
+  } catch (error) {
+    logger.warn(
+      `[ServerConfigsDB.decryptConfig] Failed to decrypt authHeaders value for ${header.name}, returning header without value`,
+      error,
+    );
+    const { value: _removed, ...headerWithoutValue } = header;
+    return headerWithoutValue;
+  }
+}
+
 /**
  * DB backed config storage
  * Handles CRUD Methods of dynamic mcp servers
@@ -307,10 +342,12 @@ export class ServerConfigsDB implements IServerConfigsRepositoryInterface {
 
     const sanitizedConfig = sanitizeUserManagedOAuthConfig(sanitizeConfigHeaderMaps(config));
 
-    /** Transformed user-provided API key config (adds customUserVars and headers) */
-    const transformedConfig = this.transformUserApiKeyConfig(sanitizedConfig);
+    /** Transformed user-provided API key and header config (adds customUserVars and headers) */
+    const transformedConfig = this.transformUserAuthHeaders(
+      this.transformUserApiKeyConfig(sanitizedConfig),
+    );
     /** Encrypted config before storing in database */
-    const encryptedConfig = await this.encryptConfig(transformedConfig);
+    const encryptedConfig = dropUnsetAdminAuthHeaders(await this.encryptConfig(transformedConfig));
     const createdServer = await this._dbMethods.createMCPServer({
       config: encryptedConfig,
       author: userId,
@@ -373,7 +410,10 @@ export class ServerConfigsDB implements IServerConfigsRepositoryInterface {
     }
 
     /** Transformed user-provided API key config (adds customUserVars and headers) */
-    configToSave = this.transformUserApiKeyConfig(configToSave, existingServer?.config);
+    configToSave = this.transformUserAuthHeaders(
+      this.transformUserApiKeyConfig(configToSave, existingServer?.config),
+      existingServer?.config,
+    );
 
     /** Encrypted config before storing in database */
     configToSave = await this.encryptConfig(configToSave);
@@ -405,7 +445,16 @@ export class ServerConfigsDB implements IServerConfigsRepositoryInterface {
       };
     }
 
-    await this._dbMethods.updateMCPServer(serverName, { config: configToSave });
+    if (configToSave.authHeaders) {
+      configToSave = {
+        ...configToSave,
+        authHeaders: mergeRetainedAuthHeaderValues(existingServer?.config, configToSave),
+      };
+    }
+
+    await this._dbMethods.updateMCPServer(serverName, {
+      config: dropUnsetAdminAuthHeaders(configToSave),
+    });
   }
 
   /**
@@ -716,6 +765,46 @@ export class ServerConfigsDB implements IServerConfigsRepositoryInterface {
   }
 
   /**
+   * Turns each user-provided auth header into a `{{MCP_HEADER_*}}` header template backed by a
+   * generated customUserVars entry, so each user supplies their own value.
+   */
+  private transformUserAuthHeaders(
+    config: ParsedServerConfig,
+    existingConfig?: ParsedServerConfig,
+  ): ParsedServerConfig {
+    const userHeaders = config.authHeaders?.filter(({ source }) => source === 'user');
+    if (!userHeaders?.length) {
+      return config;
+    }
+
+    const headers: Record<string, string> = {};
+    const customUserVars: NonNullable<ParsedServerConfig['customUserVars']> = {};
+    for (const [name, value] of Object.entries(config.customUserVars ?? {})) {
+      if (!userHeaders.some((header) => isGeneratedAuthHeaderVariable(name, header.name))) {
+        customUserVars[name] = value;
+      }
+    }
+    for (const { name } of userHeaders) {
+      const variable = getUserAuthHeaderVariable(name, config, existingConfig);
+      headers[name] = `{{${variable}}}`;
+      customUserVars[variable] = {
+        title: name,
+        description: `Your value for the ${name} header`,
+      };
+    }
+
+    const result = config as ParsedServerConfig & { headers?: Record<string, string> };
+    return {
+      ...result,
+      headers: { ...result.headers, ...headers },
+      customUserVars,
+      authHeaders: config.authHeaders!.map(({ name, source, value }) =>
+        source === 'user' ? { name, source } : { name, source, value },
+      ),
+    } as ParsedServerConfig;
+  }
+
+  /**
    * Encrypts sensitive fields in config before database storage.
    * Encrypts oauth.client_secret and apiKey.key (when source === 'admin').
    * Throws on failure to prevent storing plaintext secrets.
@@ -731,6 +820,21 @@ export class ServerConfigsDB implements IServerConfigsRepositoryInterface {
         };
       } catch (error) {
         logger.error('[ServerConfigsDB.encryptConfig] Failed to encrypt apiKey.key', error);
+        throw new Error('Failed to encrypt MCP server configuration');
+      }
+    }
+
+    if (result.authHeaders?.some(({ source, value }) => source === 'admin' && !!value)) {
+      try {
+        result.authHeaders = await Promise.all(
+          result.authHeaders.map(async (header) =>
+            header.source === 'admin' && header.value
+              ? { ...header, value: await encryptV2(header.value) }
+              : header,
+          ),
+        );
+      } catch (error) {
+        logger.error('[ServerConfigsDB.encryptConfig] Failed to encrypt authHeaders value', error);
         throw new Error('Failed to encrypt MCP server configuration');
       }
     }
@@ -776,6 +880,10 @@ export class ServerConfigsDB implements IServerConfigsRepositoryInterface {
         const { key: _removedKey, ...apiKeyWithoutKey } = result.apiKey;
         result.apiKey = apiKeyWithoutKey;
       }
+    }
+
+    if (result.authHeaders) {
+      result.authHeaders = await Promise.all(result.authHeaders.map(decryptAuthHeader));
     }
 
     if (result.oauth?.client_secret) {

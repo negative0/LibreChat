@@ -14,6 +14,7 @@ import {
 import type { MCPServerFormData } from '../hooks/useMCPServerForm';
 import { AuthTypeEnum, AuthorizationTypeEnum } from '../hooks/useMCPServerForm';
 import { useLocalize, useCopyToClipboard, useHasAccess } from '~/hooks';
+import HeadersSection from './HeadersSection';
 import { Collapse } from '~/components/ui';
 import { cn } from '~/utils';
 
@@ -188,6 +189,8 @@ export default function AuthSection({ isEditMode, serverName }: AuthSectionProps
               </div>
             </Collapse>
           </div>
+
+          <HeadersSection isEditMode={isEditMode} />
         </div>
       </Collapse>
 
