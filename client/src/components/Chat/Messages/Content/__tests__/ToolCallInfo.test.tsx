@@ -82,6 +82,26 @@ describe('ToolCallInfo', () => {
     });
   });
 
+  describe('complex parameters', () => {
+    it('renders long values in full and pretty-prints JSON-encoded strings', () => {
+      const projectId = 'p'.repeat(300);
+      const body = JSON.stringify({ url: 'https://docs.uptiq.dev', projectId });
+      render(<ToolCallInfo input={JSON.stringify({ body, headers: { a: 1 } })} />);
+
+      const bodyValue = screen.getByText(
+        (_, el) => el?.tagName === 'PRE' && el.textContent?.includes('docs.uptiq.dev') === true,
+      );
+      expect(bodyValue.textContent).toBe(JSON.stringify(JSON.parse(body), null, 2));
+      expect(bodyValue.textContent).toContain(projectId);
+      expect(bodyValue.className).not.toContain('truncate');
+    });
+
+    it('keeps non-JSON strings that start with a brace unchanged', () => {
+      render(<ToolCallInfo input={JSON.stringify({ text: '{not json', nested: { a: 1 } })} />);
+      expect(screen.getByText('{not json')).toBeInTheDocument();
+    });
+  });
+
   describe('edge cases', () => {
     it('renders with only input and no output', () => {
       render(<ToolCallInfo {...baseProps} />);
