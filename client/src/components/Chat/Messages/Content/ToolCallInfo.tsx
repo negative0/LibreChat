@@ -25,7 +25,7 @@ function KeyValueInput({ data }: { data: Record<string, string | number | boolea
       {Object.entries(data).map(([key, value]) => (
         <div key={key} className="flex items-baseline gap-1.5">
           <span className="text-text-secondary font-medium">{key}</span>
-          <span className="bg-surface-tertiary text-text-primary rounded px-1.5 py-0.5">
+          <span className="bg-surface-tertiary text-text-primary min-w-0 rounded px-1.5 py-0.5 wrap-anywhere">
             {String(value ?? 'null')}
           </span>
         </div>
@@ -34,29 +34,37 @@ function KeyValueInput({ data }: { data: Record<string, string | number | boolea
   );
 }
 
+/** Pretty-prints objects and JSON-encoded strings so nested arguments stay readable in full. */
 function formatParamValue(value: unknown): string {
   if (value === null || value === undefined) {
     return '';
   }
   if (typeof value === 'string') {
-    return value.length > 200 ? value.slice(0, 200) + '...' : value;
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+      return value;
+    }
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch {
+      return value;
+    }
   }
   if (typeof value !== 'object') {
     return String(value);
   }
-  const str = JSON.stringify(value);
-  return str.length > 200 ? str.slice(0, 200) + '...' : str;
+  return JSON.stringify(value, null, 2);
 }
 
 function ComplexInput({ data }: { data: Record<string, unknown> }) {
   return (
-    <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs">
+    <div className="flex flex-col gap-1.5 text-xs">
       {Object.entries(data).map(([key, value]) => (
-        <div key={key} className="flex items-baseline gap-1.5">
+        <div key={key} className="flex min-w-0 flex-col gap-1">
           <span className="text-text-secondary font-medium">{key}</span>
-          <span className="bg-surface-tertiary text-text-primary max-w-[18.75rem] truncate overflow-hidden rounded px-1.5 py-0.5 font-mono">
+          <pre className="bg-surface-tertiary text-text-primary max-h-64 overflow-auto rounded px-1.5 py-0.5 font-mono wrap-anywhere whitespace-pre-wrap">
             {formatParamValue(value)}
-          </span>
+          </pre>
         </div>
       ))}
     </div>
@@ -78,13 +86,15 @@ function InputRenderer({ input }: { input: string }) {
     }
     // Valid JSON but not a plain object (array, string, number, boolean) — render formatted
     return (
-      <pre className="text-text-primary text-xs whitespace-pre-wrap">
+      <pre className="text-text-primary text-xs wrap-anywhere whitespace-pre-wrap">
         {typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2)}
       </pre>
     );
   } catch {
     // Not JSON — render as plain text
-    return <pre className="text-text-primary text-xs whitespace-pre-wrap">{input}</pre>;
+    return (
+      <pre className="text-text-primary text-xs wrap-anywhere whitespace-pre-wrap">{input}</pre>
+    );
   }
 }
 
